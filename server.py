@@ -1,7 +1,6 @@
 from fastapi import FastAPI, APIRouter, UploadFile, File, HTTPException
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
 import io
@@ -27,19 +26,8 @@ logger = logging.getLogger("resumate")
 db = None
 client = None
 
-mongo_url = os.environ.get("MONGO_URL")
-db_name = os.environ.get("DB_NAME")
+print("🚀 Running Resumate backend in DEMO MODE (no database)")
 
-if mongo_url and db_name:
-    try:
-        client = AsyncIOMotorClient(mongo_url, serverSelectionTimeoutMS=2000)
-        db = client[db_name]
-        logger.info("MongoDB configured")
-    except Exception as e:
-        logger.warning(f"MongoDB unavailable, running without DB: {e}")
-        db = None
-else:
-    logger.info("MongoDB env vars not set, running without DB")
 
 # ---------------- APP ----------------
 app = FastAPI()
@@ -160,8 +148,3 @@ async def analyze(
 
 # ---------------- FINALIZE ----------------
 app.include_router(api_router)
-
-@app.on_event("shutdown")
-async def shutdown():
-    if client:
-        client.close()
