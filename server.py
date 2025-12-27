@@ -52,6 +52,13 @@ class ResumeAnalysisResult(BaseModel):
     filename: str
     analyzed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
+# ADDED FOR FIX: Feedback model for POST /api/feedback endpoint
+class FeedbackSubmission(BaseModel):
+    analysis_id: str
+    rating: int = Field(ge=1, le=5)
+    comment: str = ""
+    helpful: bool = True
+
 # ---------------- ROLE MAP ----------------
 ROLE_REQUIREMENTS = {
     "ai_ml_intern": {
@@ -436,6 +443,10 @@ def analyze_resume(text: str, target_role: str) -> dict:
     if total_score < 50:
         tips.append("⚠ Resume has low alignment with target role - review job requirements carefully")
 
+    # ADDED FOR FIX: Ensure improvement_tips is never empty
+    if not tips:
+        tips.append("✓ Resume meets all core requirements - keep refining and updating with new experiences")
+
     # ========================================
     # RETURN COMPREHENSIVE ANALYSIS
     # ========================================
@@ -491,5 +502,20 @@ async def analyze(file: UploadFile = File(...), target_role: str = "web_develope
         target_role=target_role,
         filename=file.filename
     )
+
+# ADDED FOR FIX: Feedback endpoint to handle POST /api/feedback
+@api_router.post("/feedback")
+async def submit_feedback(feedback: FeedbackSubmission):
+    """
+    Accept user feedback on analysis results.
+    Currently returns success without persistence (no database).
+    """
+    logger.info(f"Feedback received for analysis {feedback.analysis_id}: rating={feedback.rating}, helpful={feedback.helpful}")
+    
+    return {
+        "success": True,
+        "message": "Thank you for your feedback!",
+        "feedback_id": str(uuid.uuid4())
+    }
 
 app.include_router(api_router)
