@@ -5,9 +5,10 @@ import logging
 import io
 from pathlib import Path
 from pydantic import BaseModel, Field
-from typing import List
+from typing import List, Dict
 import uuid
 from datetime import datetime, timezone
+import re
 
 import PyPDF2
 from docx import Document
@@ -32,7 +33,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-print("🚀 Resumate backend running in REAL SCORING MODE")
+print("🚀 Resumate backend running in PRODUCTION-GRADE STRICT MODE")
 
 # ---------------- MODELS ----------------
 class ResumeAnalysisResult(BaseModel):
@@ -41,6 +42,8 @@ class ResumeAnalysisResult(BaseModel):
     skill_match_percentage: int
     project_relevance_percentage: int
     resume_depth_percentage: int
+    consistency_percentage: int  # PRODUCTION FIX: New consistency dimension
+    experience_depth_percentage: int  # PRODUCTION FIX: New experience dimension
     fit_verdict: str  # "Strong Fit" / "Partial Fit" / "Weak Fit"
     strengths: List[str]
     missing_sections: List[str]
@@ -52,34 +55,37 @@ class ResumeAnalysisResult(BaseModel):
     filename: str
     analyzed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-# ADDED FOR FIX: Feedback model for POST /api/feedback endpoint
 class FeedbackSubmission(BaseModel):
     analysis_id: str
     rating: int = Field(ge=1, le=5)
     comment: str = ""
     helpful: bool = True
 
-# ---------------- ROLE MAP ----------------
+# ---------------- ROLE MAP (PRODUCTION FIX: Increased mandatory requirements) ----------------
 ROLE_REQUIREMENTS = {
     "ai_ml_intern": {
-        "mandatory": ["python", "machine learning"],
-        "optional": ["numpy", "pandas", "scikit", "tensorflow", "pytorch"],
-        "projects": ["model", "classification", "prediction", "training"]
+        "mandatory": ["python", "machine learning", "data"],  # Increased from 2 to 3
+        "optional": ["numpy", "pandas", "scikit-learn", "tensorflow", "pytorch", "keras", "jupyter"],
+        "projects": ["machine learning model", "neural network", "classification model", "prediction model", "data analysis", "model training"],  # More specific
+        "experience_keywords": ["dataset", "trained model", "accuracy", "precision", "recall", "algorithm"]
     },
     "web_developer": {
-        "mandatory": ["html", "css", "javascript"],
-        "optional": ["react", "api", "node", "tailwind"],
-        "projects": ["website", "web app", "frontend", "backend"]
+        "mandatory": ["html", "css", "javascript"],  # Keep as 3
+        "optional": ["react", "vue", "angular", "node", "express", "api", "rest", "tailwind", "bootstrap"],
+        "projects": ["web application", "website", "web app", "frontend", "backend", "full stack"],  # More specific
+        "experience_keywords": ["responsive", "user interface", "component", "routing", "authentication"]
     },
     "data_analyst": {
-        "mandatory": ["sql", "python"],
-        "optional": ["excel", "pandas", "tableau", "power bi"],
-        "projects": ["analysis", "dashboard", "visualization"]
+        "mandatory": ["sql", "python", "data analysis"],  # Increased from 2 to 3
+        "optional": ["excel", "pandas", "tableau", "power bi", "matplotlib", "seaborn", "statistics"],
+        "projects": ["data analysis", "dashboard", "data visualization", "business intelligence", "report"],
+        "experience_keywords": ["insights", "metrics", "kpi", "trend", "correlation"]
     },
     "cloud_devops": {
-        "mandatory": ["linux", "cloud"],
-        "optional": ["aws", "docker", "ci/cd", "kubernetes"],
-        "projects": ["deployment", "pipeline", "server"]
+        "mandatory": ["linux", "cloud", "devops"],  # Increased from 2 to 3
+        "optional": ["aws", "azure", "gcp", "docker", "kubernetes", "ci/cd", "jenkins", "terraform", "ansible"],
+        "projects": ["deployment pipeline", "infrastructure", "automation", "cloud deployment", "container"],
+        "experience_keywords": ["deployment", "monitoring", "scaling", "infrastructure as code"]
     }
 }
 
@@ -92,153 +98,464 @@ def extract_text_from_docx(b: bytes) -> str:
     doc = Document(io.BytesIO(b))
     return "\n".join(p.text for p in doc.paragraphs)
 
-# ---------------- ANALYSIS HELPERS ----------------
+# ---------------- ANALYSIS HELPERS (PRODUCTION FIX: Separated strong/weak evidence) ----------------
 
-# Evidence words that indicate real skill usage (not just keyword stuffing)
-EVIDENCE_WORDS = [
-    "experience", "worked", "developed", "built", "created", "implemented",
-    "designed", "managed", "led", "deployed", "optimized", "automated",
-    "project", "projects", "role", "position", "job", "internship",
-    "responsibilities", "achieved", "delivered", "contributed", "using",
-    "utilized", "applied", "proficient", "expertise", "skilled"
+# PRODUCTION FIX: Strong evidence = action verbs that show real usage
+STRONG_EVIDENCE_WORDS = [
+    "developed", "built", "created", "implemented", "designed", "architected",
+    "engineered", "deployed", "optimized", "automated", "led", "managed",
+    "delivered", "shipped", "launched", "maintained", "integrated", "configured"
 ]
 
-# Project indicators that show structured project descriptions
-PROJECT_INDICATORS = [
-    "project", "projects", "developed", "built", "created", "implemented",
-    "designed", "deployed", "application", "system", "platform", "tool",
-    "website", "app", "dashboard", "model", "algorithm"
+# PRODUCTION FIX: Weak evidence = passive mentions (lower weight)
+WEAK_EVIDENCE_WORDS = [
+    "worked", "used", "utilized", "applied", "familiar", "knowledge",
+    "experience", "exposure", "responsibilities", "achieved", "contributed"
 ]
 
-# Section headers that indicate structured resume
+# PRODUCTION FIX: Experience indicators for depth scoring
+PROFESSIONAL_INDICATORS = [
+    "internship", "intern", "co-op", "full-time", "part-time", "contract",
+    "company", "organization", "corporation", "startup", "firm", "role", "position"
+]
+
+ACADEMIC_INDICATORS = [
+    "university", "college", "course", "coursework", "assignment", "semester",
+    "academic", "research", "thesis", "capstone"
+]
+
+# Section headers for structure detection
 SECTION_HEADERS = [
-    "experience", "work experience", "employment", "skills", "technical skills",
-    "projects", "education", "certifications", "achievements", "summary"
+    "experience", "work experience", "employment", "professional experience",
+    "skills", "technical skills", "projects", "education", "certifications",
+    "achievements", "summary", "objective"
 ]
 
-def find_skill_with_context(text_lower: str, skill: str, window: int = 100) -> bool:
+# PRODUCTION FIX: Stricter context window based on skill importance
+CONTEXT_WINDOWS = {
+    "mandatory": 40,   # Very tight - must be closely associated
+    "optional": 50,    # Tight but slightly more lenient
+    "projects": 80     # Moderate for project descriptions
+}
+
+def find_skill_with_context(text_lower: str, skill: str, window: int, require_strong: bool = False) -> Dict:
     """
-    Check if skill appears with evidence words nearby (within window characters).
-    This prevents simple keyword stuffing from being rewarded.
-    """
-    import re
+    PRODUCTION FIX: Enhanced context validation with evidence quality scoring.
     
-    # Find all occurrences of the skill
+    Returns dict with:
+    - found: bool
+    - evidence_type: "strong" | "weak" | "none"
+    - occurrences: int
+    """
     pattern = re.compile(r'\b' + re.escape(skill) + r'\b', re.IGNORECASE)
-    matches = pattern.finditer(text_lower)
+    matches = list(pattern.finditer(text_lower))
+    
+    if not matches:
+        return {"found": False, "evidence_type": "none", "occurrences": 0}
+    
+    strong_evidence_found = False
+    weak_evidence_found = False
     
     for match in matches:
         start = max(0, match.start() - window)
         end = min(len(text_lower), match.end() + window)
         context = text_lower[start:end]
         
-        # Check if any evidence word appears in the context window
-        if any(evidence in context for evidence in EVIDENCE_WORDS):
-            return True
+        # Check for strong evidence
+        if any(evidence in context for evidence in STRONG_EVIDENCE_WORDS):
+            strong_evidence_found = True
+            break
+        
+        # Check for weak evidence
+        if any(evidence in context for evidence in WEAK_EVIDENCE_WORDS):
+            weak_evidence_found = True
     
-    return False
+    if require_strong and not strong_evidence_found:
+        return {"found": False, "evidence_type": "weak" if weak_evidence_found else "none", "occurrences": len(matches)}
+    
+    if strong_evidence_found:
+        return {"found": True, "evidence_type": "strong", "occurrences": len(matches)}
+    elif weak_evidence_found:
+        return {"found": True, "evidence_type": "weak", "occurrences": len(matches)}
+    else:
+        return {"found": False, "evidence_type": "none", "occurrences": len(matches)}
 
-def analyze_project_depth(text: str, text_lower: str, project_keywords: List[str]) -> dict:
+def detect_keyword_stuffing(text: str, skills: List[str]) -> float:
     """
-    Analyze project quality beyond simple keyword matching.
-    Checks for:
-    1. Project section headers
-    2. Project keywords with descriptions (not just mentions)
-    3. Length and detail of project descriptions
+    PRODUCTION FIX: Detect if resume has unnaturally high keyword density.
+    Returns penalty multiplier (0.6 to 1.0)
+    """
+    text_lower = text.lower()
+    words = text_lower.split()
+    total_words = len(words)
+    
+    if total_words < 50:
+        return 0.7  # Very short resume = suspicious
+    
+    # Count how many times skills appear
+    skill_mentions = sum(text_lower.count(skill.lower()) for skill in skills)
+    
+    # Calculate density
+    density = skill_mentions / total_words
+    
+    # Suspicious if more than 8% of words are skill keywords
+    if density > 0.08:
+        return 0.6  # Heavy penalty for keyword stuffing
+    elif density > 0.06:
+        return 0.75
+    elif density > 0.04:
+        return 0.9
+    else:
+        return 1.0  # No penalty
+
+def analyze_experience_depth(text: str, text_lower: str) -> Dict:
+    """
+    PRODUCTION FIX: Analyze experience depth and professional vs personal projects.
+    
+    Returns:
+    - has_professional_experience: bool
+    - has_internship: bool
+    - has_academic_projects: bool
+    - experience_months: int (estimated)
+    - experience_score: 0-100
     """
     lines = text.split('\n')
     
-    # Check for project section
-    has_project_section = any(
-        'project' in line.lower() and len(line.strip()) < 50
-        for line in lines
-    )
+    # Detect professional experience
+    has_professional = any(indicator in text_lower for indicator in PROFESSIONAL_INDICATORS)
     
-    # Find project keywords with context
+    # Detect internship specifically
+    has_internship = "intern" in text_lower
+    
+    # Detect academic projects
+    has_academic = any(indicator in text_lower for indicator in ACADEMIC_INDICATORS)
+    
+    # Try to extract duration (years/months)
+    duration_patterns = [
+        r'(\d+)\+?\s*years?',
+        r'(\d+)\+?\s*months?',
+        r'(\d{4})\s*-\s*(\d{4})',  # Year ranges
+        r'(\d{4})\s*-\s*present',
+    ]
+    
+    total_months = 0
+    for pattern in duration_patterns:
+        matches = re.findall(pattern, text_lower)
+        if 'year' in pattern:
+            total_months += sum(int(m) * 12 for m in matches if m.isdigit())
+        elif 'month' in pattern:
+            total_months += sum(int(m) for m in matches if m.isdigit())
+        elif len(matches) > 0 and isinstance(matches[0], tuple):
+            # Year range
+            for match in matches:
+                if match[0].isdigit() and (match[1].isdigit() if len(match) > 1 else True):
+                    start_year = int(match[0])
+                    end_year = int(match[1]) if len(match) > 1 and match[1].isdigit() else 2025
+                    total_months += (end_year - start_year) * 12
+    
+    # Cap at reasonable maximum (4 years for students)
+    total_months = min(total_months, 48)
+    
+    # Calculate experience score
+    experience_score = 0
+    
+    if has_professional:
+        experience_score += 40
+    
+    if has_internship:
+        experience_score += 30
+    
+    if has_academic:
+        experience_score += 15
+    
+    # Duration bonus
+    if total_months >= 24:  # 2+ years
+        experience_score += 15
+    elif total_months >= 12:  # 1+ year
+        experience_score += 10
+    elif total_months >= 6:  # 6+ months
+        experience_score += 5
+    
+    experience_score = min(100, experience_score)
+    
+    return {
+        "has_professional_experience": has_professional,
+        "has_internship": has_internship,
+        "has_academic_projects": has_academic,
+        "experience_months": total_months,
+        "experience_score": experience_score
+    }
+
+def analyze_project_depth(text: str, text_lower: str, project_keywords: List[str], all_skills: List[str]) -> dict:
+    """
+    PRODUCTION FIX: Stricter project analysis with content validation.
+    
+    Now checks for:
+    1. Actual project section (not just mentions)
+    2. Project descriptions with minimum length
+    3. Technical details in projects
+    4. Skills demonstrated in projects
+    """
+    lines = text.split('\n')
+    
+    # PRODUCTION FIX: Find actual project section with content
+    project_section_start = -1
+    project_section_end = -1
+    
+    for i, line in enumerate(lines):
+        line_clean = line.strip().lower()
+        # Check if this is a project header (short line with "project")
+        if 'project' in line_clean and len(line_clean) < 30 and i > 0:
+            # Verify it's not in the middle of a sentence
+            prev_line = lines[i-1].strip()
+            if len(prev_line) == 0 or prev_line.endswith(('.', ':', '!')):
+                project_section_start = i
+                # Find next section or end
+                for j in range(i + 1, len(lines)):
+                    next_line = lines[j].strip().lower()
+                    if any(section in next_line for section in SECTION_HEADERS) and len(next_line) < 30:
+                        project_section_end = j
+                        break
+                if project_section_end == -1:
+                    project_section_end = len(lines)
+                break
+    
+    has_project_section = project_section_start != -1
+    project_content = ""
+    if has_project_section:
+        project_content = "\n".join(lines[project_section_start:project_section_end]).lower()
+    
+    # PRODUCTION FIX: Find project keywords only in project section
     found_projects = []
     for keyword in project_keywords:
-        if find_skill_with_context(text_lower, keyword, window=150):
-            found_projects.append(keyword)
+        if has_project_section:
+            # Must appear in project section with context
+            if find_skill_with_context(project_content, keyword, CONTEXT_WINDOWS["projects"])["found"]:
+                found_projects.append(keyword)
+        else:
+            # If no section, require very strong evidence
+            result = find_skill_with_context(text_lower, keyword, CONTEXT_WINDOWS["projects"], require_strong=True)
+            if result["found"] and result["evidence_type"] == "strong":
+                found_projects.append(keyword)
     
-    # Check for project detail indicators (descriptions, bullet points, etc.)
+    # PRODUCTION FIX: Calculate project score based on real content
     project_detail_score = 0
+    
+    # Has dedicated section
     if has_project_section:
-        project_detail_score += 30
+        project_detail_score += 25
+        
+        # Check content length in project section
+        if len(project_content) > 300:
+            project_detail_score += 25
+        elif len(project_content) > 150:
+            project_detail_score += 15
+        elif len(project_content) > 50:
+            project_detail_score += 5
     
-    # Check for structured project descriptions (bullet points, dashes, etc.)
-    bullet_lines = [line for line in lines if line.strip().startswith(('•', '-', '*', '◦'))]
-    if len(bullet_lines) >= 3:
-        project_detail_score += 30
+    # Check for structured descriptions (bullets in project section)
+    if has_project_section:
+        project_bullets = [line for line in lines[project_section_start:project_section_end] 
+                          if line.strip().startswith(('•', '-', '*', '◦'))]
+        if len(project_bullets) >= 5:
+            project_detail_score += 20
+        elif len(project_bullets) >= 3:
+            project_detail_score += 10
     
-    # Check for project description length (meaningful projects have details)
-    if len(found_projects) > 0:
-        project_detail_score += min(40, len(found_projects) * 15)
+    # PRODUCTION FIX: Check if projects mention technical skills
+    skills_in_projects = 0
+    if has_project_section:
+        for skill in all_skills:
+            if skill.lower() in project_content:
+                skills_in_projects += 1
+    
+    if skills_in_projects >= 3:
+        project_detail_score += 20
+    elif skills_in_projects >= 2:
+        project_detail_score += 10
+    
+    # Reward multiple distinct projects (look for project titles/names)
+    if has_project_section:
+        # Count lines that look like project titles (capitalized, not too long)
+        project_titles = 0
+        for line in lines[project_section_start:project_section_end]:
+            line_strip = line.strip()
+            if (len(line_strip) > 10 and len(line_strip) < 60 and 
+                line_strip[0].isupper() and not line_strip.startswith(('•', '-', '*', '◦'))):
+                project_titles += 1
+        
+        if project_titles >= 3:
+            project_detail_score += 10
+    
+    project_detail_score = min(100, project_detail_score)
     
     return {
         "found_projects": found_projects,
         "has_project_section": has_project_section,
-        "project_detail_score": min(100, project_detail_score)
+        "project_detail_score": project_detail_score,
+        "skills_demonstrated_in_projects": skills_in_projects
     }
 
 def detect_resume_structure(text: str, text_lower: str) -> dict:
     """
-    Analyze resume structure and organization.
-    Well-structured resumes indicate professionalism.
+    PRODUCTION FIX: Stricter structure detection - must be real sections with content.
     """
     lines = text.split('\n')
     
-    # Find section headers
+    # PRODUCTION FIX: Find actual section headers (not just mentions)
     found_sections = []
     for section in SECTION_HEADERS:
-        for line in lines:
+        for i, line in enumerate(lines):
             line_clean = line.strip().lower()
-            if section in line_clean and len(line_clean) < 50:
-                found_sections.append(section)
-                break
+            # Must be short line (likely a header)
+            if section in line_clean and len(line_clean) < 40:
+                # Check if previous line is empty (typical section separator)
+                if i > 0 and len(lines[i-1].strip()) == 0:
+                    # Check if content follows (next 3 lines not empty)
+                    has_content = False
+                    for j in range(i+1, min(i+4, len(lines))):
+                        if len(lines[j].strip()) > 0:
+                            has_content = True
+                            break
+                    if has_content:
+                        found_sections.append(section)
+                        break
     
     # Check for bullet points (indicates organized content)
     bullet_count = sum(1 for line in lines if line.strip().startswith(('•', '-', '*', '◦')))
     
+    # PRODUCTION FIX: Check bullet content quality (not just count)
+    meaningful_bullets = 0
+    for line in lines:
+        if line.strip().startswith(('•', '-', '*', '◦')):
+            content = line.strip()[1:].strip()
+            # Bullet must have reasonable length
+            if len(content) > 20:
+                meaningful_bullets += 1
+    
     # Check for date patterns (indicates timeline/experience)
-    import re
     date_pattern = r'\b(20\d{2}|19\d{2})\b|\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{4}\b'
     has_dates = bool(re.search(date_pattern, text_lower))
     
+    # PRODUCTION FIX: Stricter structure scoring
     structure_score = 0
-    if len(found_sections) >= 3:
-        structure_score += 40
-    elif len(found_sections) >= 2:
+    if len(found_sections) >= 4:
+        structure_score += 35
+    elif len(found_sections) >= 3:
         structure_score += 25
-    elif len(found_sections) >= 1:
-        structure_score += 10
-    
-    if bullet_count >= 5:
-        structure_score += 30
-    elif bullet_count >= 3:
+    elif len(found_sections) >= 2:
         structure_score += 15
     
-    if has_dates:
+    # Reward meaningful bullets, not just any bullets
+    if meaningful_bullets >= 8:
         structure_score += 30
+    elif meaningful_bullets >= 5:
+        structure_score += 20
+    elif meaningful_bullets >= 3:
+        structure_score += 10
+    
+    if has_dates:
+        structure_score += 20
+    
+    # PRODUCTION FIX: Check for contact information (email/phone)
+    has_contact = bool(re.search(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', text))
+    if has_contact:
+        structure_score += 15
+    
+    structure_score = min(100, structure_score)
     
     return {
         "found_sections": found_sections,
         "bullet_count": bullet_count,
+        "meaningful_bullets": meaningful_bullets,
         "has_dates": has_dates,
-        "structure_score": min(100, structure_score)
+        "has_contact": has_contact,
+        "structure_score": structure_score
     }
 
-# ---------------- ENHANCED ANALYSIS ENGINE ----------------
+def calculate_consistency_score(found_mandatory: List[str], found_optional: List[str], 
+                                found_projects: List[str], project_content: str, 
+                                text_lower: str) -> Dict:
+    """
+    PRODUCTION FIX: New dimension - check if claimed skills are actually demonstrated.
+    
+    Validates:
+    1. Skills listed in "Skills" section are used in projects
+    2. Skills are mentioned in experience section
+    3. No orphaned skills (claimed but never used)
+    """
+    all_claimed_skills = found_mandatory + found_optional
+    
+    if len(all_claimed_skills) == 0:
+        return {"consistency_score": 0, "orphaned_skills": [], "well_demonstrated_skills": []}
+    
+    # For each skill, check how many places it appears
+    well_demonstrated = []
+    orphaned = []
+    
+    for skill in all_claimed_skills:
+        appearances = 0
+        
+        # Check if in projects (most important)
+        if any(proj_keyword in skill.lower() or skill.lower() in proj_keyword.lower() 
+               for proj_keyword in found_projects):
+            appearances += 2  # Projects count more
+        
+        # Check mentions in text with strong evidence
+        result = find_skill_with_context(text_lower, skill, 50)
+        if result["found"] and result["evidence_type"] == "strong":
+            appearances += 2
+        elif result["found"]:
+            appearances += 1
+        
+        # Check occurrence count
+        if result["occurrences"] >= 3:
+            appearances += 1
+        
+        # Classify
+        if appearances >= 3:
+            well_demonstrated.append(skill)
+        elif appearances <= 1:
+            orphaned.append(skill)
+    
+    # Calculate consistency percentage
+    if len(all_claimed_skills) > 0:
+        consistency_percentage = int((len(well_demonstrated) / len(all_claimed_skills)) * 100)
+    else:
+        consistency_percentage = 0
+    
+    # Penalize orphaned skills
+    orphaned_ratio = len(orphaned) / max(len(all_claimed_skills), 1)
+    if orphaned_ratio > 0.4:  # More than 40% orphaned = major issue
+        consistency_percentage = int(consistency_percentage * 0.6)
+    elif orphaned_ratio > 0.2:  # More than 20% orphaned
+        consistency_percentage = int(consistency_percentage * 0.8)
+    
+    return {
+        "consistency_score": min(100, consistency_percentage),
+        "orphaned_skills": orphaned,
+        "well_demonstrated_skills": well_demonstrated
+    }
+
+# ---------------- ENHANCED ANALYSIS ENGINE (PRODUCTION FIXES APPLIED) ----------------
 def analyze_resume(text: str, target_role: str) -> dict:
     """
-    Evidence-based, strict resume analysis.
+    PRODUCTION-GRADE STRICT ANALYSIS ENGINE
     
-    Scoring breakdown (100 points total):
-    - Mandatory Skills: 40 points (all-or-nothing approach)
-    - Optional Skills: 20 points (diminishing returns, context-aware)
-    - Project Depth: 25 points (structured analysis, not just keywords)
-    - Resume Quality: 15 points (structure, depth, professionalism)
+    NEW Scoring breakdown (100 points total):
+    - Mandatory Skills: 30 points (stricter validation, evidence quality matters)
+    - Optional Skills: 15 points (harsher diminishing returns)
+    - Project Depth: 25 points (must have real content, not just keywords)
+    - Experience Depth: 10 points (professional > internship > academic)
+    - Consistency: 10 points (skills must be demonstrated, not just listed)
+    - Resume Quality: 10 points (structure, formatting, completeness)
     
-    Philosophy: Real evidence > keyword stuffing
+    NEW Penalty System (Multiplicative):
+    - Missing mandatory skills: Progressive penalties
+    - No projects: ×0.70
+    - No professional experience: ×0.85
+    - High keyword stuffing: ×0.60 to ×0.90
+    - Low consistency: ×0.90
     """
     text_l = text.lower()
     role = ROLE_REQUIREMENTS.get(target_role)
@@ -249,6 +566,8 @@ def analyze_resume(text: str, target_role: str) -> dict:
             "skill_match_percentage": 0,
             "project_relevance_percentage": 0,
             "resume_depth_percentage": 0,
+            "consistency_percentage": 0,
+            "experience_depth_percentage": 0,
             "fit_verdict": "Weak Fit",
             "strengths": [],
             "missing_sections": [],
@@ -261,191 +580,292 @@ def analyze_resume(text: str, target_role: str) -> dict:
     mandatory = role["mandatory"]
     optional = role["optional"]
     project_keywords = role["projects"]
+    all_skills = mandatory + optional
 
     # ========================================
-    # 1. MANDATORY SKILLS (40 points)
-    # All-or-nothing: Missing even one = heavy penalty
+    # PRODUCTION FIX: Detect keyword stuffing early
     # ========================================
-    found_mandatory_with_context = []
+    stuffing_penalty = detect_keyword_stuffing(text, all_skills)
+
+    # ========================================
+    # 1. MANDATORY SKILLS (30 points) - STRICTER
+    # ========================================
+    found_mandatory_details = {}
     for skill in mandatory:
-        if find_skill_with_context(text_l, skill, window=100):
+        result = find_skill_with_context(text_l, skill, CONTEXT_WINDOWS["mandatory"])
+        found_mandatory_details[skill] = result
+    
+    # PRODUCTION FIX: Weight by evidence quality
+    mandatory_score = 0
+    found_mandatory_with_context = []
+    
+    for skill, details in found_mandatory_details.items():
+        if details["found"]:
             found_mandatory_with_context.append(skill)
+            if details["evidence_type"] == "strong":
+                mandatory_score += (30 / len(mandatory))  # Full credit
+            elif details["evidence_type"] == "weak":
+                mandatory_score += (30 / len(mandatory)) * 0.6  # Reduced credit
     
     missing_mandatory = [s for s in mandatory if s not in found_mandatory_with_context]
-    
     mandatory_ratio = len(found_mandatory_with_context) / len(mandatory)
-    
-    if mandatory_ratio == 1.0:
-        # All mandatory skills found with evidence
-        mandatory_score = 40
-    elif mandatory_ratio >= 0.5:
-        # Missing some mandatory skills = harsh penalty
-        mandatory_score = int(mandatory_ratio * 25)  # Max 25 points if missing any
-    else:
-        # Missing most mandatory skills = severe penalty
-        mandatory_score = int(mandatory_ratio * 15)  # Max 15 points
-    
     skill_match_percentage = int(mandatory_ratio * 100)
 
     # ========================================
-    # 2. OPTIONAL SKILLS (20 points)
-    # Diminishing returns + context validation
+    # 2. OPTIONAL SKILLS (15 points) - HARSHER
     # ========================================
-    found_optional_with_context = []
+    found_optional_details = {}
     for skill in optional:
-        if find_skill_with_context(text_l, skill, window=100):
-            found_optional_with_context.append(skill)
+        result = find_skill_with_context(text_l, skill, CONTEXT_WINDOWS["optional"])
+        found_optional_details[skill] = result
     
-    # Diminishing returns: 1st skill = 8pts, 2nd = 6pts, 3rd = 4pts, 4th+ = 2pts each
+    found_optional_with_context = [s for s, d in found_optional_details.items() if d["found"]]
+    
+    # PRODUCTION FIX: Harsher diminishing returns
     optional_score = 0
+    point_values = [5, 4, 3, 2, 1]  # First skill = 5pts, drastically decreases
+    
     for i, skill in enumerate(found_optional_with_context):
-        if i == 0:
-            optional_score += 8
-        elif i == 1:
-            optional_score += 6
-        elif i == 2:
-            optional_score += 4
+        if i < len(point_values):
+            points = point_values[i]
         else:
-            optional_score += 2
+            points = 0.5  # Minimal credit for additional skills
         
-        if optional_score >= 20:
+        # PRODUCTION FIX: Reduce points for weak evidence
+        if found_optional_details[skill]["evidence_type"] == "weak":
+            points *= 0.6
+        
+        optional_score += points
+        
+        if optional_score >= 15:
             break
     
-    optional_score = min(20, optional_score)
+    optional_score = min(15, optional_score)
 
     # ========================================
-    # 3. PROJECT DEPTH (25 points)
-    # Structured analysis: sections, descriptions, evidence
+    # 3. PROJECT DEPTH (25 points) - MUCH STRICTER
     # ========================================
-    project_analysis = analyze_project_depth(text, text_l, project_keywords)
+    project_analysis = analyze_project_depth(text, text_l, project_keywords, all_skills)
     found_projects = project_analysis["found_projects"]
     has_project_section = project_analysis["has_project_section"]
     project_detail_score = project_analysis["project_detail_score"]
+    skills_in_projects = project_analysis["skills_demonstrated_in_projects"]
     
-    # Convert project detail score (0-100) to actual points (0-25)
     project_score = int((project_detail_score / 100) * 25)
     project_relevance_percentage = project_detail_score
 
     # ========================================
-    # 4. RESUME QUALITY (15 points)
-    # Structure, depth, professionalism
+    # 4. EXPERIENCE DEPTH (10 points) - NEW
+    # ========================================
+    experience_analysis = analyze_experience_depth(text, text_l)
+    experience_score_percent = experience_analysis["experience_score"]
+    experience_score = int((experience_score_percent / 100) * 10)
+    experience_depth_percentage = experience_score_percent
+
+    # ========================================
+    # 5. CONSISTENCY SCORE (10 points) - NEW
+    # ========================================
+    consistency_analysis = calculate_consistency_score(
+        found_mandatory_with_context,
+        found_optional_with_context,
+        found_projects,
+        "",  # We don't have separate project content here
+        text_l
+    )
+    consistency_percentage = consistency_analysis["consistency_score"]
+    consistency_score = int((consistency_percentage / 100) * 10)
+
+    # ========================================
+    # 6. RESUME QUALITY (10 points) - REBALANCED
     # ========================================
     structure_analysis = detect_resume_structure(text, text_l)
     structure_score = structure_analysis["structure_score"]
     
-    # Text length quality
-    length_score = 0
-    if len(text) > 1500:
-        length_score = 100
-    elif len(text) > 1000:
-        length_score = 70
-    elif len(text) > 600:
-        length_score = 40
-    else:
-        length_score = 20
+    # PRODUCTION FIX: Quality based on multiple factors
+    quality_components = []
     
-    # Combine structure and length (weighted average)
-    quality_score_percent = int((structure_score * 0.6) + (length_score * 0.4))
-    quality_score = int((quality_score_percent / 100) * 15)
+    # Structure
+    quality_components.append(structure_score * 0.5)
+    
+    # Length (but not just raw length - check for substance)
+    words = len(text.split())
+    if words > 400:
+        quality_components.append(100 * 0.3)
+    elif words > 250:
+        quality_components.append(70 * 0.3)
+    elif words > 150:
+        quality_components.append(40 * 0.3)
+    else:
+        quality_components.append(20 * 0.3)
+    
+    # Unique word count (avoid repetition)
+    unique_words = len(set(text.lower().split()))
+    uniqueness_ratio = unique_words / max(words, 1)
+    if uniqueness_ratio > 0.6:
+        quality_components.append(100 * 0.2)
+    elif uniqueness_ratio > 0.4:
+        quality_components.append(60 * 0.2)
+    else:
+        quality_components.append(30 * 0.2)
+    
+    quality_score_percent = int(sum(quality_components))
+    quality_score = int((quality_score_percent / 100) * 10)
     resume_depth_percentage = quality_score_percent
 
     # ========================================
-    # TOTAL SCORE CALCULATION
+    # TOTAL SCORE CALCULATION (Base Score)
     # ========================================
-    total_score = mandatory_score + optional_score + project_score + quality_score
+    base_score = mandatory_score + optional_score + project_score + experience_score + consistency_score + quality_score
 
     # ========================================
-    # HARD PENALTIES (stricter than before)
+    # PRODUCTION FIX: MULTIPLICATIVE PENALTIES (Order matters!)
     # ========================================
+    total_score = base_score
+    penalties_applied = []
     
-    # PENALTY 1: Missing ANY mandatory skill = cap score
-    if len(found_mandatory_with_context) < len(mandatory):
-        total_score = min(total_score, 60)  # Cannot exceed 60 if missing mandatory
+    # PENALTY 1: Keyword stuffing (apply first)
+    if stuffing_penalty < 1.0:
+        total_score *= stuffing_penalty
+        penalties_applied.append(f"Keyword density too high (×{stuffing_penalty})")
     
-    # PENALTY 2: Missing ALL mandatory skills = severe cap
+    # PENALTY 2: Missing mandatory skills (progressive)
     if len(found_mandatory_with_context) == 0:
-        total_score = min(total_score, 35)  # Cannot exceed 35 if NO mandatory skills
+        total_score *= 0.40  # Missing ALL mandatory = severe
+        penalties_applied.append("Missing all mandatory skills (×0.40)")
+    elif len(missing_mandatory) >= len(mandatory) * 0.5:
+        total_score *= 0.65  # Missing 50%+ mandatory
+        penalties_applied.append(f"Missing {len(missing_mandatory)}/{len(mandatory)} mandatory skills (×0.65)")
+    elif len(missing_mandatory) > 0:
+        total_score *= 0.80  # Missing some mandatory
+        penalties_applied.append(f"Missing {len(missing_mandatory)} mandatory skills (×0.80)")
     
-    # PENALTY 3: No project evidence = cap score
+    # PENALTY 3: No projects
     if not found_projects:
-        total_score = min(total_score, 55)  # Cannot exceed 55 without projects
+        total_score *= 0.70
+        penalties_applied.append("No relevant project experience (×0.70)")
     
-    # PENALTY 4: Thin resume (< 500 chars) = additional penalty
-    if len(text) < 500:
-        total_score = int(total_score * 0.7)  # 30% penalty for very thin resumes
+    # PENALTY 4: No professional experience
+    if not experience_analysis["has_professional_experience"] and not experience_analysis["has_internship"]:
+        total_score *= 0.85
+        penalties_applied.append("No professional experience (×0.85)")
+    
+    # PENALTY 5: Poor consistency (claimed skills not demonstrated)
+    if consistency_percentage < 40:
+        total_score *= 0.90
+        penalties_applied.append("Many skills not demonstrated (×0.90)")
+    
+    # PENALTY 6: Very thin resume (< 400 chars)
+    if len(text) < 400:
+        total_score *= 0.65
+        penalties_applied.append("Resume too brief (×0.65)")
 
     # Final bounds
-    total_score = max(5, min(100, total_score))
+    total_score = int(max(5, min(100, total_score)))
 
     # ========================================
-    # FIT VERDICT
+    # FIT VERDICT (STRICTER THRESHOLDS)
     # ========================================
     if total_score >= 75:
         fit_verdict = "Strong Fit"
-    elif total_score >= 50:
+    elif total_score >= 55:  # Raised from 50
         fit_verdict = "Partial Fit"
     else:
         fit_verdict = "Weak Fit"
 
     # ========================================
-    # STRENGTHS & IMPROVEMENT TIPS
+    # STRENGTHS & IMPROVEMENT TIPS (MORE SPECIFIC)
     # ========================================
     strengths = []
     tips = []
 
     # Strengths
     if len(found_mandatory_with_context) == len(mandatory):
-        strengths.append(f"✓ All mandatory skills present with evidence ({', '.join(found_mandatory_with_context)})")
+        strong_count = sum(1 for s in found_mandatory_with_context 
+                          if found_mandatory_details[s]["evidence_type"] == "strong")
+        if strong_count == len(mandatory):
+            strengths.append(f"✓ All mandatory skills demonstrated with strong evidence: {', '.join(found_mandatory_with_context)}")
+        else:
+            strengths.append(f"✓ All mandatory skills present: {', '.join(found_mandatory_with_context)}")
     elif len(found_mandatory_with_context) > 0:
-        strengths.append(f"✓ Some mandatory skills detected: {', '.join(found_mandatory_with_context)}")
+        strengths.append(f"✓ Found {len(found_mandatory_with_context)}/{len(mandatory)} mandatory skills: {', '.join(found_mandatory_with_context)}")
     
     if len(found_optional_with_context) >= 3:
-        strengths.append(f"✓ Strong supporting skills: {', '.join(found_optional_with_context[:3])}")
+        strengths.append(f"✓ Strong supporting skills portfolio: {', '.join(found_optional_with_context[:4])}")
     elif len(found_optional_with_context) > 0:
-        strengths.append(f"✓ Additional relevant skills: {', '.join(found_optional_with_context)}")
+        strengths.append(f"✓ Additional skills: {', '.join(found_optional_with_context[:3])}")
     
-    if has_project_section:
-        strengths.append("✓ Dedicated projects section found")
+    if has_project_section and len(found_projects) >= 2:
+        strengths.append(f"✓ Well-documented projects section with {len(found_projects)} relevant projects")
+    elif has_project_section:
+        strengths.append("✓ Dedicated projects section present")
     
-    if len(found_projects) >= 2:
-        strengths.append(f"✓ Role-relevant project experience: {', '.join(found_projects[:3])}")
+    if skills_in_projects >= 3:
+        strengths.append(f"✓ Skills well-integrated in projects ({skills_in_projects} skills demonstrated)")
     
-    if structure_analysis["structure_score"] >= 70:
-        strengths.append("✓ Well-structured and organized resume")
+    if experience_analysis["has_professional_experience"]:
+        strengths.append("✓ Professional work experience documented")
+    elif experience_analysis["has_internship"]:
+        strengths.append("✓ Internship experience included")
     
-    if len(text) > 1200:
-        strengths.append("✓ Comprehensive resume with good depth")
+    if consistency_percentage >= 70:
+        strengths.append(f"✓ Strong consistency - skills are demonstrated ({consistency_percentage}% validation)")
+    
+    if structure_analysis["structure_score"] >= 75:
+        strengths.append("✓ Excellently structured and organized resume")
 
-    # Improvement Tips
+    # Improvement Tips (PRODUCTION FIX: More actionable and specific)
     if missing_mandatory:
-        tips.append(f"⚠ Missing critical mandatory skills: {', '.join(missing_mandatory)}")
+        tips.append(f"❌ CRITICAL: Add mandatory skills with evidence: {', '.join(missing_mandatory)}")
     
-    if len(found_optional_with_context) < 2:
-        tips.append(f"⚠ Add more supporting skills like: {', '.join(optional[:3])}")
+    # Check for weak evidence on mandatory skills
+    weak_mandatory = [s for s in found_mandatory_with_context 
+                     if found_mandatory_details[s]["evidence_type"] == "weak"]
+    if weak_mandatory:
+        tips.append(f"⚠️ Strengthen evidence for: {', '.join(weak_mandatory)} (use action verbs like 'developed', 'built', 'implemented')")
+    
+    if len(found_optional_with_context) < 3:
+        missing_optional = [s for s in optional[:5] if s not in found_optional_with_context]
+        tips.append(f"⚠️ Add more supporting skills: {', '.join(missing_optional[:3])}")
     
     if not found_projects:
-        tips.append("⚠ No role-specific project experience found - add relevant projects")
+        tips.append(f"❌ CRITICAL: Add relevant projects (e.g., {', '.join(project_keywords[:2])})")
     elif len(found_projects) < 2:
-        tips.append("⚠ Limited project evidence - showcase more relevant projects")
+        tips.append(f"⚠️ Add more diverse projects covering: {', '.join([p for p in project_keywords if p not in found_projects][:2])}")
     
     if not has_project_section:
-        tips.append("⚠ Add a dedicated 'Projects' section to highlight your work")
+        tips.append("⚠️ Create a dedicated 'Projects' section with detailed descriptions")
+    elif project_detail_score < 50:
+        tips.append("⚠️ Expand project descriptions - add technologies used, challenges solved, outcomes achieved")
     
-    if structure_analysis["structure_score"] < 50:
-        tips.append("⚠ Resume lacks clear structure - add section headers (Experience, Skills, Projects)")
+    if skills_in_projects < 2:
+        tips.append("⚠️ Mention specific technical skills in your project descriptions")
     
-    if len(text) < 800:
-        tips.append("⚠ Resume is too brief - add more details about your experience and projects")
+    if not experience_analysis["has_professional_experience"] and not experience_analysis["has_internship"]:
+        tips.append("⚠️ Add internship or work experience if available")
     
-    if len(structure_analysis["found_sections"]) < 2:
-        tips.append("⚠ Missing key sections - include Experience, Education, Skills, Projects")
+    if consistency_percentage < 50:
+        orphaned = consistency_analysis["orphaned_skills"]
+        if orphaned:
+            tips.append(f"⚠️ These skills lack evidence: {', '.join(orphaned[:3])} - demonstrate them in projects or remove")
     
-    if total_score < 50:
-        tips.append("⚠ Resume has low alignment with target role - review job requirements carefully")
+    if structure_analysis["structure_score"] < 60:
+        tips.append("⚠️ Improve resume structure - add clear section headers (Experience, Skills, Projects, Education)")
+    
+    if structure_analysis["meaningful_bullets"] < 5:
+        tips.append("⚠️ Use bullet points to organize your experience and projects")
+    
+    if len(text.split()) < 250:
+        tips.append("⚠️ Resume is too brief - add more details about your work and projects (aim for 300-500 words)")
+    
+    if stuffing_penalty < 0.9:
+        tips.append("⚠️ Reduce keyword repetition - focus on demonstrating skills through detailed descriptions")
+    
+    if total_score < 55 and not tips:
+        tips.append("⚠️ Resume needs significant improvement - review all mandatory requirements and add detailed project descriptions")
 
-    # ADDED FOR FIX: Ensure improvement_tips is never empty
+    # Ensure tips is never empty
     if not tips:
-        tips.append("✓ Resume meets all core requirements - keep refining and updating with new experiences")
+        tips.append("✓ Solid resume foundation - continue building experience and refining descriptions")
 
     # ========================================
     # RETURN COMPREHENSIVE ANALYSIS
@@ -455,19 +875,24 @@ def analyze_resume(text: str, target_role: str) -> dict:
         "skill_match_percentage": skill_match_percentage,
         "project_relevance_percentage": project_relevance_percentage,
         "resume_depth_percentage": resume_depth_percentage,
+        "consistency_percentage": consistency_percentage,
+        "experience_depth_percentage": experience_depth_percentage,
         "fit_verdict": fit_verdict,
-        "strengths": strengths[:6],  # Top 6 strengths
+        "strengths": strengths[:6],
         "missing_sections": missing_mandatory,
-        "improvement_tips": tips[:6],  # Top 6 tips
+        "improvement_tips": tips[:8],  # Allow more tips for detailed guidance
         "found_mandatory_skills": found_mandatory_with_context,
         "found_optional_skills": found_optional_with_context,
-        "found_project_indicators": found_projects
+        "found_project_indicators": found_projects,
+        "penalties_applied": penalties_applied,  # For debugging/transparency
+        "keyword_stuffing_detected": stuffing_penalty < 1.0,
+        "consistency_details": consistency_analysis
     }
 
 # ---------------- ROUTES ----------------
 @api_router.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {"status": "ok", "mode": "production-strict"}
 
 @api_router.post("/analyze", response_model=ResumeAnalysisResult)
 async def analyze(file: UploadFile = File(...), target_role: str = "web_developer"):
@@ -492,6 +917,8 @@ async def analyze(file: UploadFile = File(...), target_role: str = "web_develope
         skill_match_percentage=analysis["skill_match_percentage"],
         project_relevance_percentage=analysis["project_relevance_percentage"],
         resume_depth_percentage=analysis["resume_depth_percentage"],
+        consistency_percentage=analysis["consistency_percentage"],
+        experience_depth_percentage=analysis["experience_depth_percentage"],
         fit_verdict=analysis["fit_verdict"],
         strengths=analysis["strengths"],
         missing_sections=analysis["missing_sections"],
@@ -503,7 +930,6 @@ async def analyze(file: UploadFile = File(...), target_role: str = "web_develope
         filename=file.filename
     )
 
-# ADDED FOR FIX: Feedback endpoint to handle POST /api/feedback
 @api_router.post("/feedback")
 async def submit_feedback(feedback: FeedbackSubmission):
     """
